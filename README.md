@@ -1,6 +1,6 @@
 # Media Info Comparison
 
-Compare Video Files informations.  
+Compare video files informations side by side.  
 Useful when you want to discovery which is probably the original (or best) video file between a list of videos.  
 
 Usage: download `mediainfo.ps1` file and double click it.   

@@ -1,4 +1,6 @@
-﻿Add-Type -AssemblyName System.Windows.Forms
+# Media Info Comparison by Terremoth: https://github.com/terremoth
+
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -50,6 +52,11 @@ $form.WindowState = "Maximized"
 $form.StartPosition = "CenterScreen"
 $form.AllowDrop = $true
 $form.MinimumSize = New-Object System.Drawing.Size(800,600)
+
+$iconPath = Join-Path $scriptDir "mediainfo.ico"
+if (Test-Path $iconPath) {
+    $form.Icon = New-Object System.Drawing.Icon($iconPath)
+}
 
 $lblTitle = New-Object System.Windows.Forms.Label
 $lblTitle.Text = "Media Info Comparison"
@@ -155,7 +162,6 @@ $btnLoadFFMPEG.Add_Click({
         $global:ffmpegPath = $ofd.FileName
         $txtFFMPEG.Text = $global:ffmpegPath
         
-        # Se ffprobe estiver na mesma pasta
         $possibleFFPROBE = Join-Path (Split-Path $global:ffmpegPath) "ffprobe.exe"
         if (Test-Path $possibleFFPROBE) {
             $global:ffprobePath = $possibleFFPROBE

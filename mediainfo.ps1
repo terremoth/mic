@@ -55,7 +55,11 @@ $form.MinimumSize = New-Object System.Drawing.Size(800,600)
 
 $iconPath = Join-Path $scriptDir "mediainfo.ico"
 if (Test-Path $iconPath) {
-    $form.Icon = New-Object System.Drawing.Icon($iconPath)
+    try {
+        $form.Icon = New-Object System.Drawing.Icon($iconPath)
+    } catch {
+        # Dies silently without icon
+    }
 }
 
 $lblTitle = New-Object System.Windows.Forms.Label
@@ -73,7 +77,6 @@ $linkAuthor.Location = New-Object System.Drawing.Point(30, 60)
 [void]$linkAuthor.Links.Add(3, 44, "https://github.com/terremoth/mic")
 $form.Controls.Add($linkAuthor)
 
-# Evento para abrir o link no navegador padrão
 $linkAuthor.Add_LinkClicked({
     param($sender, $e)
     Start-Process $e.Link.LinkData
@@ -186,14 +189,27 @@ $btnLoadFFPROBE.Add_Click({
 function Get-MediaInfo($filepath) {
     $tmp_stream = Join-Path $env:TEMP "ffprobe_stream.tmp"
     $tmp_format = Join-Path $env:TEMP "ffprobe_format.tmp"
+    $tmp_meta   = Join-Path $env:TEMP "ffprobe_meta.tmp"
 
-    & $global:ffprobePath -v error -select_streams v:0 -show_entries stream=codec_name,width,height,r_frame_rate -of default=noprint_wrappers=1:nokey=0 "$filepath" > $tmp_stream
-    & $global:ffprobePath -v error -show_entries format=duration,bit_rate -of default=noprint_wrappers=1:nokey=0 "$filepath" > $tmp_format
+    & $global:ffprobePath -v error -select_streams v:0 `
+        -show_entries stream=codec_name,profile,level,width,height,r_frame_rate,color_space,color_transfer,color_primaries,chroma_location,bits_per_raw_sample,gop_size `
+        -of default=noprint_wrappers=1:nokey=0 "$filepath" > $tmp_stream
 
-    $codec = $width = $height = $fps = $duration = $bitrate = $null
+    & $global:ffprobePath -v error `
+        -show_entries format=duration,bit_rate,format_long_name,major_brand `
+        -of default=noprint_wrappers=1:nokey=0 "$filepath" > $tmp_format
+
+    $info = @{
+        "Profile" = $null; "Level" = $null; "ColorSpace" = $null; "ColorTransfer" = $null
+        "ColorPrimaries" = $null; "ChromaLocation" = $null; "BitsPerRawSample" = $null;
+    }
+
+    $codec = $width = $height = $fps = $duration = $bitrate = $formatName = $null
 
     Get-Content $tmp_stream | ForEach-Object {
         if ($_ -match '^codec_name=(.+)$') { $codec = $Matches[1] }
+        elseif ($_ -match '^profile=(.+)$') { $info["Profile"] = $Matches[1] }
+        elseif ($_ -match '^level=(.+)$') { $info["Level"] = $Matches[1] }
         elseif ($_ -match '^width=(\d+)$') { $width = [int]$Matches[1] }
         elseif ($_ -match '^height=(\d+)$') { $height = [int]$Matches[1] }
         elseif ($_ -match '^r_frame_rate=(.+)$') {
@@ -202,54 +218,59 @@ function Get-MediaInfo($filepath) {
                 $fps = [math]::Round([double]$Matches[1] / [double]$Matches[2], 2)
             } else { $fps = $fps_raw }
         }
+        elseif ($_ -match '^color_space=(.+)$') { $info["ColorSpace"] = $Matches[1] }
+        elseif ($_ -match '^color_transfer=(.+)$') { $info["ColorTransfer"] = $Matches[1] }
+        elseif ($_ -match '^color_primaries=(.+)$') { $info["ColorPrimaries"] = $Matches[1] }
+        elseif ($_ -match '^chroma_location=(.+)$') { $info["ChromaLocation"] = $Matches[1] }
+        elseif ($_ -match '^bits_per_raw_sample=(.+)$') { $info["BitsPerRawSample"] = $Matches[1] }
     }
 
     Get-Content $tmp_format | ForEach-Object {
         if ($_ -match '^duration=(.+)$') { $duration = [double]$Matches[1] }
         elseif ($_ -match '^bit_rate=(.+)$') { $bitrate = $Matches[1] }
+        elseif ($_ -match '^format_long_name=(.+)$') { $formatName = $Matches[1] }
+        elseif ($_ -match '^major_brand=(.+)$') { $info["MajorBrand"] = $Matches[1] }
     }
 
-    $resolvedPath = $filepath
-    if (Test-Path $filepath) {
-        try { $resolvedPath = (Resolve-Path $filepath -ErrorAction Stop).Path } catch {}
-    }
-
-    $fileInfo = Get-Item -LiteralPath $resolvedPath
-    $fileName = $fileInfo.Name
+    $fileInfo = Get-Item -LiteralPath $filepath
     $size_bytes = $fileInfo.Length
     $size_mb = [math]::Round($size_bytes / 1MB, 2)
-    $created = $fileInfo.CreationTime
-    $modified = $fileInfo.LastWriteTime
 
-    $duration_formatted = ""
+    $duration_fmt = ""
     if ($duration) {
         $total_secs = [int][math]::Floor($duration)
         $hours = [int]($total_secs / 3600)
         $mins = [int](($total_secs % 3600) / 60)
         $secs = $total_secs % 60
-        if ($hours -gt 0) { $duration_formatted += "${hours}h" }
-        if ($mins -gt 0) { $duration_formatted += "${mins}m" }
-        $duration_formatted += "${secs}s"
+        if ($hours -gt 0) { $duration_fmt += "${hours}h" }
+        if ($mins -gt 0) { $duration_fmt += "${mins}m" }
+        $duration_fmt += "${secs}s"
     }
 
-    Remove-Item $tmp_stream, $tmp_format -ErrorAction SilentlyContinue
+    $culture = Get-Culture
+    $dateFormat = $culture.DateTimeFormat.ShortDatePattern + " " + $culture.DateTimeFormat.LongTimePattern
+
+    Remove-Item $tmp_stream, $tmp_format, $tmp_meta -ErrorAction SilentlyContinue
 
     return @{
-        "File"        = $fileName
-        "Format"      = [System.IO.Path]::GetExtension($fileInfo.Name).TrimStart('.')
-        "Codec"       = $codec
-        "Width"       = $width
-        "Height"      = $height
-        "FPS"         = $fps
-        "Duration"    = $duration
-        "DurationFmt" = $duration_formatted
-        "Bitrate"     = [double]$bitrate
-        "Size"        = $size_bytes
-        "TotalSize"   = "$size_bytes bytes (~$size_mb MB)"
-        "Created"     = $created
-        "Modified"    = $modified
-    }
+        "File"          = $fileInfo.Name
+        "Format"        = [System.IO.Path]::GetExtension($fileInfo.Name).TrimStart('.')
+        "Codec"         = $codec
+        "Width"         = $width
+        "Height"        = $height
+        "FPS"           = $fps
+        "Duration"      = $duration
+        "DurationFmt"   = $duration_fmt
+        "Bitrate"       = [double]$bitrate
+        "Size"          = $size_bytes
+        "TotalSize"     = "$size_bytes bytes (~$size_mb MB)"
+        "Created"       = $fileInfo.CreationTime.ToString($dateFormat)
+        "Modified"      = $fileInfo.LastWriteTime.ToString($dateFormat)
+        "CreatedRaw"    = $fileInfo.CreationTime
+        "ModifiedRaw"   = $fileInfo.LastWriteTime
+    } + $info
 }
+
 
 function Compare-And-Highlight($infos) {
     $listView.Clear()
@@ -263,21 +284,35 @@ function Compare-And-Highlight($infos) {
         $listView.Columns.Add($info["File"], $colWidth) | Out-Null
     }
 
-    $properties = @("Codec","Format","Width","Height","FPS","Duration","Bitrate","TotalSize","Created","Modified")
+    $properties = @(
+        "Codec","Format","Profile","Level","Width","Height","FPS",
+        "Duration","Bitrate","TotalSize","ColorSpace","ColorTransfer",
+        "ColorPrimaries","ChromaLocation","BitsPerRawSample",
+        "Created","Modified"
+    )
+
     foreach ($prop in $properties) {
         $row = New-Object System.Windows.Forms.ListViewItem($prop)
         foreach ($info in $infos) {
             switch ($prop) {
-                "Duration" { $row.SubItems.Add("$($info[$prop]) sec ($($info["DurationFmt"]))") | Out-Null }
-                default    { $row.SubItems.Add($info[$prop].ToString()) | Out-Null }
+                "Duration" { 
+                    $row.SubItems.Add("$($info[$prop]) sec ($($info["DurationFmt"]))") | Out-Null 
+                }
+                default { 
+                    $row.SubItems.Add($info[$prop].ToString()) | Out-Null 
+                }
             }
         }
         $listView.Items.Add($row) | Out-Null
     }
 
     $compareProps = @("Width","Height","FPS","Duration","Bitrate","Size","Created","Modified")
+    $culture = Get-Culture
+    $dateFormat = $culture.DateTimeFormat.ShortDatePattern + " " + $culture.DateTimeFormat.LongTimePattern
+
     for ($i=0; $i -lt $compareProps.Count; $i++) {
         $prop = $compareProps[$i]
+
         if ($prop -eq "Size") {
             $rowIndex = $properties.IndexOf("TotalSize")
         } elseif ($properties.IndexOf($prop) -ne -1) {
@@ -287,34 +322,88 @@ function Compare-And-Highlight($infos) {
         }
 
         $bestIndex = @()
+        $worstIndex = @()
         $bestValue = $null
+        $worstValue = $null
+        $isDate = ($prop -eq "Created" -or $prop -eq "Modified")
 
         for ($j=0; $j -lt $infos.Count; $j++) {
             $value = $infos[$j][$prop]
-            if ($value -is [datetime]) {
-                if ($bestValue -eq $null -or $value -gt $bestValue) {
-                    $bestValue = $value
+
+            if ($isDate) {
+                try {
+                    $dt = [DateTime]::ParseExact($value, $dateFormat, $culture)
+                    $seconds = [int]($dt - [DateTime]'1970-01-01').TotalSeconds
+                } catch {
+                    $seconds = 0
+                }
+
+                # Best = mais antigo (menor timestamp)
+                if ($bestValue -eq $null -or $seconds -lt $bestValue) {
+                    $bestValue = $seconds
                     $bestIndex = @($j)
-                } elseif ($value -eq $bestValue) { $bestIndex += $j }
+                } elseif ($seconds -eq $bestValue) {
+                    $bestIndex += $j
+                }
+
+                # Worst = mais recente (maior timestamp)
+                if ($worstValue -eq $null -or $seconds -gt $worstValue) {
+                    $worstValue = $seconds
+                    $worstIndex = @($j)
+                } elseif ($seconds -eq $worstValue) {
+                    $worstIndex += $j
+                }
+
             } else {
+                # Best = maior valor
                 if ($bestValue -eq $null -or $value -gt $bestValue) {
                     $bestValue = $value
                     $bestIndex = @($j)
-                } elseif ($value -eq $bestValue) { $bestIndex += $j }
+                } elseif ($value -eq $bestValue) {
+                    $bestIndex += $j
+                }
+
+                # Worst = menor valor
+                if ($worstValue -eq $null -or $value -lt $worstValue) {
+                    $worstValue = $value
+                    $worstIndex = @($j)
+                } elseif ($value -eq $worstValue) {
+                    $worstIndex += $j
+                }
             }
         }
 
-        foreach ($idx in $bestIndex) {
-            $cell = $listView.Items[$rowIndex].SubItems[$idx+1]
-            $cell.BackColor = [System.Drawing.Color]::DarkGreen
-            $cell.ForeColor = [System.Drawing.Color]::White
+        # Se todos são iguais, só pinta de verde (já está OK)
+        $allEqual = ($bestValue -eq $worstValue)
+
+        if (-not $allEqual) {
+            # Destaca melhores em verde
+            foreach ($idx in $bestIndex) {
+                $cell = $listView.Items[$rowIndex].SubItems[$idx + 1]
+                $cell.BackColor = [System.Drawing.Color]::DarkGreen
+                $cell.ForeColor = [System.Drawing.Color]::White
+            }
+            # Destaca piores em vermelho
+            foreach ($idx in $worstIndex) {
+                $cell = $listView.Items[$rowIndex].SubItems[$idx + 1]
+                $cell.BackColor = [System.Drawing.Color]::DarkRed
+                $cell.ForeColor = [System.Drawing.Color]::White
+            }
+        } else {
+            # Todos iguais: pinta só de verde (melhores)
+            foreach ($idx in $bestIndex) {
+                $cell = $listView.Items[$rowIndex].SubItems[$idx + 1]
+                $cell.BackColor = [System.Drawing.Color]::DarkGreen
+                $cell.ForeColor = [System.Drawing.Color]::White
+            }
         }
     }
 }
 
+
 $btnSelect.Add_Click({
     $ofd = New-Object System.Windows.Forms.OpenFileDialog
-    $ofd.Filter = "Video Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv|All Files|*.*"
+    $ofd.Filter = "Video Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.3gp;*.ts;*.m2ts;*.vob;*.mpg;*.mpeg;*.divx;*.ogv;*.f4v;*.rm;*.rmvb|All Files|*.*"
     $ofd.Multiselect = $true
     if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $infos = @()
